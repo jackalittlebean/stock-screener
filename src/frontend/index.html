@@ -1,0 +1,629 @@
+<!DOCTYPE html>
+<html lang="zh-TW" x-data="screener()" x-init="init()">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>台股篩選器</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.0/firebase-app.js";
+import {
+  getAuth,
+  GoogleAuthProvider,
+  signInWithPopup,
+  signOut,
+  onAuthStateChanged,
+} from "https://www.gstatic.com/firebasejs/10.7.0/firebase-auth.js";
+
+// TODO: 換成你自己 Firebase 專案的設定值（Firebase Console → 專案設定 → 一般 → 新增 Web 應用程式）
+const firebaseConfig = {
+  apiKey:     "AIzaSyDGE1qfwNiRDyrnrKFtHbiW3UPHLeCUtdY",
+  authDomain: "twa001-d8f61.firebaseapp.com",
+  projectId:  "twa001-d8f61",
+  appId:      "1:926742022760:web:06227e2cc463442d4949dd",
+};
+
+const firebaseApp    = initializeApp(firebaseConfig);
+const auth           = getAuth(firebaseApp);
+const googleProvider = new GoogleAuthProvider();
+
+function screener() {
+  return {
+    filters: {
+      ma_type:        '',
+      macd_signal:    '',
+      revenue_growth: '',
+      rsi_min:        null,
+      rsi_max:        null,
+      pe_max:         null,
+      eps_min:        null,
+    },
+    results:     null,
+    resultCount: 0,
+    loading:     false,
+    error:       '',
+    statusText:  '',
+    sortKey:     'code',
+    sortDir:     'asc',
+
+    user:        null,
+    authLoading: true,
+    activeTab:   'screen',
+
+    favorites:        null,
+    favoriteCodes:    new Set(),
+    favoritesLoading: false,
+    favoritesError:   '',
+
+    detail: {
+      open:    false,
+      stock:   null,
+      insight: null,
+      loading: false,
+      error:   '',
+    },
+
+    async init() {
+      onAuthStateChanged(auth, async (u) => {
+        this.user        = u;
+        this.authLoading = false;
+        if (u) {
+          await this.loadStatus();
+          await this.loadFavorites();
+        } else {
+          this.results   = null;
+          this.favorites = null;
+        }
+      });
+    },
+
+    async login() {
+      this.error = '';
+      try {
+        await signInWithPopup(auth, googleProvider);
+      } catch (e) {
+        this.error = '登入失敗：' + e.message;
+      }
+    },
+
+    async logout() {
+      await signOut(auth);
+    },
+
+    async apiFetch(url, options = {}) {
+      if (!this.user) throw new Error('尚未登入');
+      const token   = await this.user.getIdToken();
+      const headers = Object.assign({}, options.headers, { 'Authorization': 'Bearer ' + token });
+      const r = await fetch(url, Object.assign({}, options, { headers }));
+      if (r.status === 401) {
+        await signOut(auth);
+        throw new Error('登入已過期，請重新登入');
+      }
+      return r;
+    },
+
+    async loadStatus() {
+      try {
+        const r = await this.apiFetch('/api/status');
+        const d = await r.json();
+        if (d.ready) {
+          this.statusText = `資料更新：${d.updated_at}　共 ${d.stock_count} 支股票`;
+        } else {
+          this.statusText = d.message || '資料尚未準備好，請先執行 data_fetcher.py';
+        }
+      } catch {
+        this.statusText = '無法連線到後端';
+      }
+    },
+
+    switchTab(tab) {
+      this.activeTab = tab;
+      if (tab === 'favorites') this.loadFavorites();
+    },
+
+    async loadFavorites() {
+      this.favoritesLoading = true;
+      this.favoritesError   = '';
+      try {
+        const r = await this.apiFetch('/api/favorites');
+        if (!r.ok) throw new Error('讀取收藏失敗');
+        const d = await r.json();
+        this.favorites     = d.stocks;
+        this.favoriteCodes = new Set(d.stocks.map(s => s.code));
+      } catch (e) {
+        this.favoritesError = e.message;
+      } finally {
+        this.favoritesLoading = false;
+      }
+    },
+
+    async toggleFavorite(code) {
+      const isFav = this.favoriteCodes.has(code);
+      try {
+        const r = await this.apiFetch(`/api/favorites/${code}`, { method: isFav ? 'DELETE' : 'POST' });
+        if (!r.ok) throw new Error('收藏操作失敗');
+        await this.loadFavorites();
+      } catch (e) {
+        this.error = e.message;
+      }
+    },
+
+    async search() {
+      this.loading = true;
+      this.error   = '';
+      this.results = null;
+
+      const body = {};
+      if (this.filters.ma_type)        body.ma_type        = this.filters.ma_type;
+      if (this.filters.macd_signal)    body.macd_signal    = this.filters.macd_signal;
+      if (this.filters.revenue_growth) body.revenue_growth = this.filters.revenue_growth;
+      if (this.filters.rsi_min != null) body.rsi_min       = this.filters.rsi_min;
+      if (this.filters.rsi_max != null) body.rsi_max       = this.filters.rsi_max;
+      if (this.filters.pe_max  != null) body.pe_max        = this.filters.pe_max;
+      if (this.filters.eps_min != null) body.eps_min       = this.filters.eps_min;
+
+      try {
+        const r = await this.apiFetch('/api/stocks/screen', {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify(body),
+        });
+        if (!r.ok) {
+          const err = await r.json();
+          throw new Error(err.detail || '篩選失敗');
+        }
+        const d      = await r.json();
+        this.results = d.stocks;
+        this.resultCount = d.count;
+      } catch (e) {
+        this.error = e.message;
+      } finally {
+        this.loading = false;
+      }
+    },
+
+    reset() {
+      this.filters = {
+        ma_type: '', macd_signal: '', revenue_growth: '',
+        rsi_min: null, rsi_max: null, pe_max: null, eps_min: null,
+      };
+      this.results     = null;
+      this.resultCount = 0;
+      this.error       = '';
+      this.sortKey     = 'code';
+      this.sortDir     = 'asc';
+    },
+
+    sortBy(key) {
+      if (this.sortKey === key) {
+        this.sortDir = this.sortDir === 'asc' ? 'desc' : 'asc';
+      } else {
+        this.sortKey = key;
+        this.sortDir = 'asc';
+      }
+    },
+
+    sortedResults() {
+      if (!this.results) return [];
+      return [...this.results].sort((a, b) => {
+        const av = a[this.sortKey];
+        const bv = b[this.sortKey];
+        if (av === null || av === undefined) return 1;
+        if (bv === null || bv === undefined) return -1;
+        if (typeof av === 'string') {
+          return this.sortDir === 'asc' ? av.localeCompare(bv) : bv.localeCompare(av);
+        }
+        return this.sortDir === 'asc' ? av - bv : bv - av;
+      });
+    },
+
+    openDetail(stock) {
+      this.detail.open    = true;
+      this.detail.stock   = stock;
+      this.detail.insight = null;
+      this.detail.error   = '';
+    },
+
+    closeDetail() {
+      this.detail.open = false;
+    },
+
+    async loadInsight() {
+      if (!this.detail.stock) return;
+      this.detail.loading = true;
+      this.detail.error   = '';
+      try {
+        const r = await this.apiFetch(`/api/stocks/${this.detail.stock.code}/insight`);
+        if (!r.ok) {
+          const err = await r.json();
+          throw new Error(err.detail || 'AI 解讀失敗');
+        }
+        this.detail.insight = await r.json();
+      } catch (e) {
+        this.detail.error = e.message;
+      } finally {
+        this.detail.loading = false;
+      }
+    },
+  };
+}
+
+window.screener = screener;
+  </script>
+  <script src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js" defer></script>
+  <style>
+    [x-cloak] { display: none !important; }
+    .table-wrap { overflow-x: auto; }
+    .badge-golden { background:#dcfce7; color:#166534; }
+    .badge-death  { background:#fee2e2; color:#991b1b; }
+    .badge-bull   { background:#dbeafe; color:#1e40af; }
+    .badge-bear   { background:#fef9c3; color:#854d0e; }
+  </style>
+</head>
+<body class="bg-gray-50 min-h-screen font-sans">
+
+
+<!-- 載入中 / 登入牆 -->
+<div x-show="authLoading" x-cloak class="fixed inset-0 z-50 flex items-center justify-center bg-gray-50">
+  <p class="text-gray-400 text-sm">載入中…</p>
+</div>
+
+<div x-show="!authLoading && !user" x-cloak class="fixed inset-0 z-50 flex items-center justify-center bg-gray-50 px-4">
+  <div class="bg-white rounded-2xl shadow p-8 max-w-sm w-full text-center">
+    <h1 class="text-xl font-bold text-gray-800 mb-2">台股篩選器</h1>
+    <p class="text-sm text-gray-500 mb-6">請先登入才能使用</p>
+    <button @click="login()"
+            class="w-full px-6 py-2.5 rounded-xl bg-blue-600 text-white text-sm font-semibold hover:bg-blue-700 transition">
+      使用 Google 登入
+    </button>
+    <p x-show="error" x-cloak class="text-xs text-red-600 mt-4" x-text="error"></p>
+  </div>
+</div>
+
+<div x-show="!authLoading && user" x-cloak>
+
+<!-- Header -->
+<header class="bg-white shadow-sm sticky top-0 z-10">
+  <div class="max-w-6xl mx-auto px-4 py-3 flex items-center justify-between">
+    <h1 class="text-xl font-bold text-gray-800">台股篩選器</h1>
+    <div class="flex items-center gap-4">
+      <span class="text-xs text-gray-400" x-text="statusText"></span>
+      <span class="text-sm text-gray-600" x-text="user && user.displayName"></span>
+      <button @click="logout()"
+              class="text-xs px-3 py-1.5 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 transition">
+        登出
+      </button>
+    </div>
+  </div>
+</header>
+
+<main class="max-w-6xl mx-auto px-4 py-6 space-y-6">
+
+  <!-- 分頁切換 -->
+  <div class="flex gap-2">
+    <button @click="switchTab('screen')"
+            :class="activeTab==='screen' ? 'bg-blue-600 text-white' : 'bg-white text-gray-600 border border-gray-200'"
+            class="px-4 py-2 rounded-xl text-sm font-medium transition">篩選</button>
+    <button @click="switchTab('favorites')"
+            :class="activeTab==='favorites' ? 'bg-blue-600 text-white' : 'bg-white text-gray-600 border border-gray-200'"
+            class="px-4 py-2 rounded-xl text-sm font-medium transition">我的收藏</button>
+  </div>
+
+  <div x-show="activeTab==='screen'">
+
+  <!-- 篩選面板 -->
+  <section class="bg-white rounded-2xl shadow p-6">
+    <h2 class="text-base font-semibold text-gray-700 mb-4">篩選條件</h2>
+
+    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
+
+      <!-- MA 均線 -->
+      <div>
+        <label class="block text-sm font-medium text-gray-600 mb-1">均線排列</label>
+        <select x-model="filters.ma_type"
+                class="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400">
+          <option value="">不限</option>
+          <option value="5_20_bull">5MA &gt; 20MA（多頭）</option>
+          <option value="20_60_bull">20MA &gt; 60MA（多頭）</option>
+          <option value="5_20_bear">5MA &lt; 20MA（空頭）</option>
+          <option value="20_60_bear">20MA &lt; 60MA（空頭）</option>
+        </select>
+      </div>
+
+      <!-- MACD -->
+      <div>
+        <label class="block text-sm font-medium text-gray-600 mb-1">MACD</label>
+        <select x-model="filters.macd_signal"
+                class="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400">
+          <option value="">不限</option>
+          <option value="golden">黃金交叉（DIF &gt; 訊號線）</option>
+          <option value="death">死亡交叉（DIF &lt; 訊號線）</option>
+        </select>
+      </div>
+
+      <!-- 營收年增率 -->
+      <div>
+        <label class="block text-sm font-medium text-gray-600 mb-1">月營收年增率</label>
+        <select x-model="filters.revenue_growth"
+                class="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400">
+          <option value="">不限</option>
+          <option value="positive">正成長</option>
+          <option value="negative">負成長</option>
+        </select>
+      </div>
+
+      <!-- RSI 範圍 -->
+      <div class="sm:col-span-2 lg:col-span-1">
+        <label class="block text-sm font-medium text-gray-600 mb-1">
+          RSI 範圍
+          <span class="text-blue-500 font-semibold ml-1"
+                x-text="(filters.rsi_min ?? 0) + ' – ' + (filters.rsi_max ?? 100)"></span>
+        </label>
+        <div class="flex items-center gap-3">
+          <input type="number" min="0" max="100" placeholder="最小" x-model.number="filters.rsi_min"
+                 class="w-1/2 rounded-lg border border-gray-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400" />
+          <span class="text-gray-400 text-sm">–</span>
+          <input type="number" min="0" max="100" placeholder="最大" x-model.number="filters.rsi_max"
+                 class="w-1/2 rounded-lg border border-gray-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400" />
+        </div>
+        <p class="text-xs text-gray-400 mt-1">超賣 &lt;30　超買 &gt;70</p>
+      </div>
+
+      <!-- PE 上限 -->
+      <div>
+        <label class="block text-sm font-medium text-gray-600 mb-1">本益比 PE 上限</label>
+        <input type="number" min="0" placeholder="不限" x-model.number="filters.pe_max"
+               class="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400" />
+        <p class="text-xs text-gray-400 mt-1">低於此值才符合</p>
+      </div>
+
+      <!-- EPS 下限 -->
+      <div>
+        <label class="block text-sm font-medium text-gray-600 mb-1">EPS 下限（元）</label>
+        <input type="number" placeholder="不限" x-model.number="filters.eps_min"
+               class="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400" />
+        <p class="text-xs text-gray-400 mt-1">高於此值才符合</p>
+      </div>
+
+    </div>
+
+    <!-- 按鈕列 -->
+    <div class="mt-6 flex flex-wrap gap-3 items-center">
+      <button @click="search()"
+              :disabled="loading"
+              class="px-6 py-2.5 rounded-xl bg-blue-600 text-white text-sm font-semibold hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition">
+        <span x-show="!loading">開始篩選</span>
+        <span x-show="loading" x-cloak>篩選中…</span>
+      </button>
+      <button @click="reset()"
+              class="px-5 py-2.5 rounded-xl border border-gray-200 text-sm text-gray-600 hover:bg-gray-50 transition">
+        清除條件
+      </button>
+      <span x-show="results !== null && !loading" x-cloak
+            class="text-sm text-gray-500"
+            x-text="'找到 ' + resultCount + ' 支股票'"></span>
+    </div>
+
+    <!-- 錯誤訊息 -->
+    <div x-show="error" x-cloak class="mt-4 rounded-lg bg-red-50 border border-red-200 px-4 py-3 text-sm text-red-700"
+         x-text="error"></div>
+  </section>
+
+  <!-- 結果表格 -->
+  <section x-show="results !== null" x-cloak class="bg-white rounded-2xl shadow">
+    <div x-show="resultCount === 0" class="px-6 py-10 text-center text-gray-400 text-sm">
+      沒有符合條件的股票，試著放寬條件看看
+    </div>
+
+    <div x-show="resultCount > 0" class="table-wrap">
+      <table class="w-full text-sm">
+        <thead>
+          <tr class="border-b border-gray-100 text-gray-500 text-xs uppercase tracking-wide">
+            <th class="px-4 py-3 text-center">收藏</th>
+            <th class="px-4 py-3 text-left cursor-pointer select-none hover:text-blue-600 whitespace-nowrap" @click="sortBy('code')">
+              股號<span class="ml-1" :class="sortKey==='code' ? 'text-blue-500' : 'text-gray-300'" x-text="sortKey==='code' ? (sortDir==='asc' ? '▲' : '▼') : '↕'"></span>
+            </th>
+            <th class="px-4 py-3 text-left">股名</th>
+            <th class="px-4 py-3 text-right cursor-pointer select-none hover:text-blue-600 whitespace-nowrap" @click="sortBy('price')">
+              股價<span class="ml-1" :class="sortKey==='price' ? 'text-blue-500' : 'text-gray-300'" x-text="sortKey==='price' ? (sortDir==='asc' ? '▲' : '▼') : '↕'"></span>
+            </th>
+            <th class="px-4 py-3 text-right cursor-pointer select-none hover:text-blue-600 whitespace-nowrap" @click="sortBy('ma5')">
+              5MA<span class="ml-1" :class="sortKey==='ma5' ? 'text-blue-500' : 'text-gray-300'" x-text="sortKey==='ma5' ? (sortDir==='asc' ? '▲' : '▼') : '↕'"></span>
+            </th>
+            <th class="px-4 py-3 text-right cursor-pointer select-none hover:text-blue-600 whitespace-nowrap" @click="sortBy('ma20')">
+              20MA<span class="ml-1" :class="sortKey==='ma20' ? 'text-blue-500' : 'text-gray-300'" x-text="sortKey==='ma20' ? (sortDir==='asc' ? '▲' : '▼') : '↕'"></span>
+            </th>
+            <th class="px-4 py-3 text-right cursor-pointer select-none hover:text-blue-600 whitespace-nowrap" @click="sortBy('ma60')">
+              60MA<span class="ml-1" :class="sortKey==='ma60' ? 'text-blue-500' : 'text-gray-300'" x-text="sortKey==='ma60' ? (sortDir==='asc' ? '▲' : '▼') : '↕'"></span>
+            </th>
+            <th class="px-4 py-3 text-right cursor-pointer select-none hover:text-blue-600 whitespace-nowrap" @click="sortBy('rsi')">
+              RSI<span class="ml-1" :class="sortKey==='rsi' ? 'text-blue-500' : 'text-gray-300'" x-text="sortKey==='rsi' ? (sortDir==='asc' ? '▲' : '▼') : '↕'"></span>
+            </th>
+            <th class="px-4 py-3 text-center">MACD</th>
+            <th class="px-4 py-3 text-right cursor-pointer select-none hover:text-blue-600 whitespace-nowrap" @click="sortBy('pe')">
+              PE<span class="ml-1" :class="sortKey==='pe' ? 'text-blue-500' : 'text-gray-300'" x-text="sortKey==='pe' ? (sortDir==='asc' ? '▲' : '▼') : '↕'"></span>
+            </th>
+            <th class="px-4 py-3 text-right cursor-pointer select-none hover:text-blue-600 whitespace-nowrap" @click="sortBy('eps')">
+              EPS<span class="ml-1" :class="sortKey==='eps' ? 'text-blue-500' : 'text-gray-300'" x-text="sortKey==='eps' ? (sortDir==='asc' ? '▲' : '▼') : '↕'"></span>
+            </th>
+            <th class="px-4 py-3 text-right cursor-pointer select-none hover:text-blue-600 whitespace-nowrap" @click="sortBy('revenue_growth')">
+              營收年增率<span class="ml-1" :class="sortKey==='revenue_growth' ? 'text-blue-500' : 'text-gray-300'" x-text="sortKey==='revenue_growth' ? (sortDir==='asc' ? '▲' : '▼') : '↕'"></span>
+            </th>
+            <th class="px-4 py-3 text-center">詳情</th>
+          </tr>
+        </thead>
+        <tbody>
+          <template x-for="s in sortedResults()" :key="s.code">
+            <tr class="border-b border-gray-50 hover:bg-gray-50 transition">
+              <td class="px-4 py-3 text-center">
+                <button @click="toggleFavorite(s.code)" class="text-lg"
+                        :class="favoriteCodes.has(s.code) ? 'text-yellow-400' : 'text-gray-300 hover:text-yellow-300'">★</button>
+              </td>
+              <td class="px-4 py-3 font-mono font-semibold text-blue-700" x-text="s.code"></td>
+              <td class="px-4 py-3 text-gray-800" x-text="s.name"></td>
+              <td class="px-4 py-3 text-right font-semibold" x-text="s.price ?? '—'"></td>
+              <td class="px-4 py-3 text-right text-gray-600" x-text="s.ma5 ?? '—'"></td>
+              <td class="px-4 py-3 text-right text-gray-600" x-text="s.ma20 ?? '—'"></td>
+              <td class="px-4 py-3 text-right text-gray-600" x-text="s.ma60 ?? '—'"></td>
+              <td class="px-4 py-3 text-right"
+                  :class="s.rsi < 30 ? 'text-green-600 font-semibold' : s.rsi > 70 ? 'text-red-500 font-semibold' : 'text-gray-600'"
+                  x-text="s.rsi ?? '—'"></td>
+              <td class="px-4 py-3 text-center">
+                <span x-show="s.macd_cross === 'golden'" class="text-xs px-2 py-0.5 rounded-full badge-golden">黃金</span>
+                <span x-show="s.macd_cross === 'death'"  class="text-xs px-2 py-0.5 rounded-full badge-death">死亡</span>
+                <span x-show="!s.macd_cross" class="text-gray-400">—</span>
+              </td>
+              <td class="px-4 py-3 text-right text-gray-600" x-text="s.pe ?? '—'"></td>
+              <td class="px-4 py-3 text-right text-gray-600" x-text="s.eps ?? '—'"></td>
+              <td class="px-4 py-3 text-right"
+                  :class="s.revenue_growth > 0 ? 'text-green-600' : s.revenue_growth < 0 ? 'text-red-500' : 'text-gray-400'"
+                  x-text="s.revenue_growth !== null && s.revenue_growth !== undefined ? s.revenue_growth + '%' : '—'"></td>
+              <td class="px-4 py-3 text-center">
+                <button @click="openDetail(s)"
+                        class="text-xs px-3 py-1.5 rounded-lg border border-blue-200 text-blue-600 hover:bg-blue-50 transition">
+                  詳情
+                </button>
+              </td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  </div>
+
+  <!-- 我的收藏 -->
+  <div x-show="activeTab==='favorites'">
+    <section class="bg-white rounded-2xl shadow">
+      <div x-show="favoritesLoading" class="px-6 py-10 text-center text-gray-400 text-sm">載入中…</div>
+      <div x-show="favoritesError" x-cloak class="mx-6 mt-4 rounded-lg bg-red-50 border border-red-200 px-4 py-3 text-sm text-red-700" x-text="favoritesError"></div>
+      <div x-show="!favoritesLoading && favorites && favorites.length === 0" class="px-6 py-10 text-center text-gray-400 text-sm">
+        還沒有收藏的股票，去「篩選」分頁按 ★ 加入收藏
+      </div>
+      <div x-show="!favoritesLoading && favorites && favorites.length > 0" class="table-wrap">
+        <table class="w-full text-sm">
+          <thead>
+            <tr class="border-b border-gray-100 text-gray-500 text-xs uppercase tracking-wide">
+              <th class="px-4 py-3 text-center">收藏</th>
+              <th class="px-4 py-3 text-left">股號</th>
+              <th class="px-4 py-3 text-left">股名</th>
+              <th class="px-4 py-3 text-right">股價</th>
+              <th class="px-4 py-3 text-right">RSI</th>
+              <th class="px-4 py-3 text-center">MACD</th>
+              <th class="px-4 py-3 text-right">PE</th>
+              <th class="px-4 py-3 text-right">EPS</th>
+              <th class="px-4 py-3 text-right">營收年增率</th>
+              <th class="px-4 py-3 text-center">詳情</th>
+            </tr>
+          </thead>
+          <tbody>
+            <template x-for="s in favorites" :key="s.code">
+              <tr class="border-b border-gray-50 hover:bg-gray-50 transition">
+                <td class="px-4 py-3 text-center">
+                  <button @click="toggleFavorite(s.code)" class="text-lg text-yellow-400">★</button>
+                </td>
+                <td class="px-4 py-3 font-mono font-semibold text-blue-700" x-text="s.code"></td>
+                <td class="px-4 py-3 text-gray-800" x-text="s.name"></td>
+                <td class="px-4 py-3 text-right font-semibold" x-text="s.price ?? '—'"></td>
+                <td class="px-4 py-3 text-right text-gray-600" x-text="s.rsi ?? '—'"></td>
+                <td class="px-4 py-3 text-center">
+                  <span x-show="s.macd_cross === 'golden'" class="text-xs px-2 py-0.5 rounded-full badge-golden">黃金</span>
+                  <span x-show="s.macd_cross === 'death'"  class="text-xs px-2 py-0.5 rounded-full badge-death">死亡</span>
+                  <span x-show="!s.macd_cross" class="text-gray-400">—</span>
+                </td>
+                <td class="px-4 py-3 text-right text-gray-600" x-text="s.pe ?? '—'"></td>
+                <td class="px-4 py-3 text-right text-gray-600" x-text="s.eps ?? '—'"></td>
+                <td class="px-4 py-3 text-right"
+                    :class="s.revenue_growth > 0 ? 'text-green-600' : s.revenue_growth < 0 ? 'text-red-500' : 'text-gray-400'"
+                    x-text="s.revenue_growth !== null && s.revenue_growth !== undefined ? s.revenue_growth + '%' : '—'"></td>
+                <td class="px-4 py-3 text-center">
+                  <button @click="openDetail(s)"
+                          class="text-xs px-3 py-1.5 rounded-lg border border-blue-200 text-blue-600 hover:bg-blue-50 transition">
+                    詳情
+                  </button>
+                </td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+
+</main>
+
+</div>
+
+<!-- 股票詳情 Modal -->
+<div x-show="detail.open" x-cloak
+     class="fixed inset-0 z-20 flex items-center justify-center bg-black/40 px-4"
+     @click.self="closeDetail()">
+  <div class="bg-white rounded-2xl shadow-xl w-full max-w-lg max-h-[85vh] overflow-y-auto">
+    <template x-if="detail.stock">
+      <div class="p-6">
+        <div class="flex items-start justify-between mb-4">
+          <div>
+            <h3 class="text-lg font-bold text-gray-800">
+              <span x-text="detail.stock.name"></span>
+              <span class="text-gray-400 font-mono text-sm ml-1" x-text="detail.stock.code"></span>
+              <button @click="toggleFavorite(detail.stock.code)" class="ml-1 text-lg align-middle"
+                      :class="favoriteCodes.has(detail.stock.code) ? 'text-yellow-400' : 'text-gray-300 hover:text-yellow-300'">★</button>
+            </h3>
+            <p class="text-sm text-gray-500 mt-0.5">股價 <span class="font-semibold" x-text="detail.stock.price ?? '—'"></span></p>
+          </div>
+          <button @click="closeDetail()" class="text-gray-400 hover:text-gray-600 text-xl leading-none">&times;</button>
+        </div>
+
+        <!-- 原始數據 -->
+        <div class="grid grid-cols-3 gap-3 text-sm mb-5">
+          <div class="bg-gray-50 rounded-lg p-2.5"><p class="text-xs text-gray-400">RSI</p><p class="font-semibold" x-text="detail.stock.rsi ?? '—'"></p></div>
+          <div class="bg-gray-50 rounded-lg p-2.5"><p class="text-xs text-gray-400">PE</p><p class="font-semibold" x-text="detail.stock.pe ?? '—'"></p></div>
+          <div class="bg-gray-50 rounded-lg p-2.5"><p class="text-xs text-gray-400">EPS</p><p class="font-semibold" x-text="detail.stock.eps ?? '—'"></p></div>
+          <div class="bg-gray-50 rounded-lg p-2.5"><p class="text-xs text-gray-400">5MA</p><p class="font-semibold" x-text="detail.stock.ma5 ?? '—'"></p></div>
+          <div class="bg-gray-50 rounded-lg p-2.5"><p class="text-xs text-gray-400">20MA</p><p class="font-semibold" x-text="detail.stock.ma20 ?? '—'"></p></div>
+          <div class="bg-gray-50 rounded-lg p-2.5"><p class="text-xs text-gray-400">60MA</p><p class="font-semibold" x-text="detail.stock.ma60 ?? '—'"></p></div>
+        </div>
+
+        <!-- AI 解讀 -->
+        <div class="border-t border-gray-100 pt-4">
+          <div class="flex items-center justify-between mb-2">
+            <h4 class="text-sm font-semibold text-gray-700">AI 數據解讀</h4>
+            <button x-show="!detail.insight" :disabled="detail.loading" @click="loadInsight()"
+                    class="text-xs px-3 py-1.5 rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 transition">
+              <span x-show="!detail.loading">取得 AI 解讀</span>
+              <span x-show="detail.loading" x-cloak>分析中…</span>
+            </button>
+          </div>
+
+          <div x-show="detail.error" x-cloak class="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2" x-text="detail.error"></div>
+
+          <template x-if="detail.insight">
+            <div class="space-y-3 text-sm">
+              <p class="text-gray-800 font-medium" x-text="detail.insight.summary"></p>
+              <div>
+                <p class="text-xs text-gray-400 mb-1">技術面</p>
+                <p class="text-gray-700" x-text="detail.insight.technical_note"></p>
+              </div>
+              <div>
+                <p class="text-xs text-gray-400 mb-1">基本面</p>
+                <p class="text-gray-700" x-text="detail.insight.fundamental_note"></p>
+              </div>
+              <div x-show="detail.insight.watch_points && detail.insight.watch_points.length">
+                <p class="text-xs text-gray-400 mb-1">留意重點</p>
+                <ul class="list-disc list-inside text-gray-700 space-y-0.5">
+                  <template x-for="point in detail.insight.watch_points" :key="point">
+                    <li x-text="point"></li>
+                  </template>
+                </ul>
+              </div>
+              <p class="text-xs text-gray-400 pt-2 border-t border-gray-100" x-text="detail.insight.disclaimer"></p>
+            </div>
+          </template>
+        </div>
+      </div>
+    </template>
+  </div>
+</div>
+</body>
+</html>

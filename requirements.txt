@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+yfinance
+pandas
+pandas-ta
+requests
+python-dotenv
+google-genai
+firebase-admin

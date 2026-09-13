@@ -1,0 +1,33 @@
+name: 每日更新股票資料
+
+"on":
+  schedule:
+    - cron: "0 23 * * *" # UTC 23:00 = 台灣時間早上 7:00
+  workflow_dispatch: {} # 允許手動觸發，方便測試
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: 安裝套件
+        run: pip install -r requirements.txt
+
+      - name: 還原 Firebase 服務帳戶金鑰
+        run: echo "$FIREBASE_SERVICE_ACCOUNT_JSON" > firebase-service-account.json
+        env:
+          FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+
+      - name: 抓股票清單
+        run: python src/backend/stock_list.py
+
+      - name: 抓資料並存進 Firestore
+        run: python src/backend/data_fetcher.py
+        env:
+          FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+          FIREBASE_SERVICE_ACCOUNT_PATH: ./firebase-service-account.json
