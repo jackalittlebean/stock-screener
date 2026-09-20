@@ -35,12 +35,13 @@ DISCLAIMER = "本內容由 AI 根據既有數據自動生成，僅為資訊整�
 INSIGHT_SCHEMA = {
     "type": "object",
     "properties": {
-        "summary":           {"type": "string"},
-        "technical_note":    {"type": "string"},
-        "fundamental_note":  {"type": "string"},
-        "watch_points":      {"type": "array", "items": {"type": "string"}},
+        "summary":        {"type": "string"},
+        "signal_reading": {"type": "string"},
+        "context":        {"type": "string"},
+        "watch_points":   {"type": "array", "items": {"type": "string"}},
+        "data_gaps":      {"type": "string"},
     },
-    "required": ["summary", "technical_note", "fundamental_note", "watch_points"],
+    "required": ["summary", "signal_reading", "context", "watch_points", "data_gaps"],
 }
 
 
@@ -97,8 +98,17 @@ def _build_prompt(stock: dict) -> str:
     def fmt(v):
         return "N/A" if v is None else v
 
-    return f"""你是一位協助解讀股票數據的助手，服務對象是不具財經專業知識的一般使用者。
-請只根據以下「既有數據」用白話文解讀，不要臆測公司未來走勢、不要給出買賣建議、不要引用數據以外的資訊（例如新聞、產業消息）。
+    return f"""你是一位協助解讀股票數據的分析助手，服務對象是不具財經專業知識的一般使用者。
+
+【最重要的要求】使用者的畫面上「已經看得到」下面所有數字了，所以把數字一個一個唸過一遍對他毫無價值。
+你的任務是做這些數字「擺在一起」才看得出來的判讀：訊號之間是互相印證還是互相矛盾、
+某個數字放在其他數字的脈絡下是否合理、哪些組合在投資判讀上有特殊意義。
+
+【嚴格禁止】
+- 禁止逐項複述數字（例如「RSI 是 38.9，代表偏弱」這種把畫面上的數字再講一次的句子）
+- 禁止提及公司近況、新聞、訂單、法人動向、產業趨勢、競爭對手、未來展望——你沒有這些資料，
+  講出來就是編造。只能用下面提供的數字，以及技術指標的通用判讀原則（例如 RSI 30 以下通稱超賣區）
+- 禁止給買賣建議、目標價、進出場時機
 
 股號：{stock.get('code')}
 股名：{stock.get('name')}
@@ -113,10 +123,22 @@ EPS：{fmt(stock.get('eps'))}
 月營收年增率：{fmt(stock.get('revenue_growth'))}%（N/A 代表無資料）
 
 請用繁體中文回覆，各欄位要求：
-- summary：一句話總結目前技術面與基本面狀況
-- technical_note：均線、RSI、MACD 的白話解讀（2–3 句）
-- fundamental_note：PE、EPS、營收年增率的白話解讀（2–3 句），若欄位為 N/A 要明確說明資料缺漏
-- watch_points：1–3 點使用者應留意的重點，每點一句話
+
+- summary：一句話點出這支股票目前「最關鍵的一件事」。不是總結全部數字，是挑出最值得注意的那個重點。
+
+- signal_reading：把技術面訊號與基本面訊號「合起來」判讀（3–4 句）。必須明確講出兩邊是互相印證
+  （例如股價走弱、營收也在衰退，方向一致）還是互相矛盾（例如營收正成長但股價跌破所有均線，出現背離）。
+  訊號矛盾時要說明這種背離在判讀上代表什麼、通常該從哪個角度理解。
+
+- context：把數字放進脈絡（2–3 句）。例如：這個 PE 相對於它的 EPS 和成長率是偏貴還是合理；
+  股價與各條均線的相對位置合起來反映什麼階段；RSI 距離超買／超賣區還有多少空間。
+  重點是「相對於什麼」而不是「數字是多少」。
+
+- watch_points：2–3 點「接下來什麼變化會推翻現在的判讀」。要具體可觀察，
+  例如「若股價站回 20 日均線，目前的空方判讀就需要重新評估」，而不是空泛的「注意風險」。
+
+- data_gaps：哪些欄位缺資料、因此哪部分判斷受限（1–2 句）。若資料齊全就說明判讀完整度良好。
+  這欄的用意是誠實標示不確定性，不要粉飾。
 """
 
 
@@ -129,7 +151,8 @@ def get_stock_insight(stock: dict, data_updated_at: str) -> dict:
         raise RuntimeError("尚未設定 GEMINI_API_KEY，請在 .env 填入後重啟後端")
 
     code = stock["code"]
-    cache_key = f"{code}_{data_updated_at}"
+    # 加版本號：prompt/輸出結構改版後，舊格式的快取會自動失效，不必手動清除
+    cache_key = f"{code}_{data_updated_at}_v2"
 
     cached = _load_cached(cache_key)
     if cached is not None:

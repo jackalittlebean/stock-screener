@@ -637,20 +637,24 @@ window.screener = screener;
             <div class="space-y-3 text-sm">
               <p class="text-gray-800 font-medium" x-text="detail.insight.summary"></p>
               <div>
-                <p class="text-xs text-gray-400 mb-1">技術面</p>
-                <p class="text-gray-700" x-text="detail.insight.technical_note"></p>
+                <p class="text-xs text-gray-400 mb-1">綜合判讀</p>
+                <p class="text-gray-700" x-text="detail.insight.signal_reading"></p>
               </div>
               <div>
-                <p class="text-xs text-gray-400 mb-1">基本面</p>
-                <p class="text-gray-700" x-text="detail.insight.fundamental_note"></p>
+                <p class="text-xs text-gray-400 mb-1">數字的相對位置</p>
+                <p class="text-gray-700" x-text="detail.insight.context"></p>
               </div>
               <div x-show="detail.insight.watch_points && detail.insight.watch_points.length">
-                <p class="text-xs text-gray-400 mb-1">留意重點</p>
+                <p class="text-xs text-gray-400 mb-1">接下來觀察什麼</p>
                 <ul class="list-disc list-inside text-gray-700 space-y-0.5">
                   <template x-for="point in detail.insight.watch_points" :key="point">
                     <li x-text="point"></li>
                   </template>
                 </ul>
+              </div>
+              <div x-show="detail.insight.data_gaps">
+                <p class="text-xs text-gray-400 mb-1">判讀限制</p>
+                <p class="text-xs text-gray-500" x-text="detail.insight.data_gaps"></p>
               </div>
               <p class="text-xs text-gray-400 pt-2 border-t border-gray-100" x-text="detail.insight.disclaimer"></p>
             </div>
