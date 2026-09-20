@@ -5,6 +5,7 @@
 """
 import json
 import os
+import time
 from pathlib import Path
 from datetime import datetime
 
@@ -19,6 +20,10 @@ load_dotenv(Path(__file__).parent.parent.parent / ".env")
 CACHE_COLLECTION = "ai_cache"
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL = "gemini-flash-latest"
+# Gemini 免費額度在尖峰時段常回 503 UNAVAILABLE，實測重試一次多半就成功，
+# 因此對暫時性錯誤退避重試，而不是一次失敗就把技術錯誤丟給使用者看。
+MAX_ATTEMPTS = 3
+RETRY_BACKOFF_SECONDS = (2, 4)
 
 DISCLAIMER = "本內容由 AI 根據既有數據自動生成，僅為資訊整理，非投資建議，請自行判斷風險。"
 
@@ -41,6 +46,40 @@ def _load_cached(cache_key: str) -> dict | None:
 
 def _save_cached(cache_key: str, result: dict) -> None:
     db.collection(CACHE_COLLECTION).document(cache_key).set(result)
+
+
+def _is_transient(err: Exception) -> bool:
+    """判斷是不是 Google 端的暫時性狀況（過載、限流），這類重試有機會成功。"""
+    code = getattr(err, "code", None)
+    if code in (429, 500, 502, 503, 504):
+        return True
+    text = str(err)
+    return "UNAVAILABLE" in text or "RESOURCE_EXHAUSTED" in text
+
+
+def _generate_with_retry(client, prompt: str):
+    """呼叫 Gemini，遇到暫時性錯誤時退避重試。"""
+    last_err = None
+    for attempt in range(MAX_ATTEMPTS):
+        try:
+            return client.models.generate_content(
+                model=GEMINI_MODEL,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=INSIGHT_SCHEMA,
+                ),
+            )
+        except Exception as err:
+            last_err = err
+            if attempt < MAX_ATTEMPTS - 1 and _is_transient(err):
+                time.sleep(RETRY_BACKOFF_SECONDS[attempt])
+                continue
+            break
+
+    if _is_transient(last_err):
+        raise RuntimeError("AI 服務目前忙碌中，請稍後再試一次") from last_err
+    raise RuntimeError("AI 解讀產生失敗，請稍後再試") from last_err
 
 
 def _build_prompt(stock: dict) -> str:
@@ -86,14 +125,7 @@ def get_stock_insight(stock: dict, data_updated_at: str) -> dict:
         return cached
 
     client = genai.Client(api_key=GEMINI_API_KEY)
-    response = client.models.generate_content(
-        model=GEMINI_MODEL,
-        contents=_build_prompt(stock),
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-            response_schema=INSIGHT_SCHEMA,
-        ),
-    )
+    response = _generate_with_retry(client, _build_prompt(stock))
     result = json.loads(response.text)
     result["disclaimer"] = DISCLAIMER
     result["generated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
