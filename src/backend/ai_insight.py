@@ -19,11 +19,16 @@ load_dotenv(Path(__file__).parent.parent.parent / ".env")
 
 CACHE_COLLECTION = "ai_cache"
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_MODEL = "gemini-flash-latest"
-# Gemini 免費額度在尖峰時段常回 503 UNAVAILABLE，實測重試一次多半就成功，
-# 因此對暫時性錯誤退避重試，而不是一次失敗就把技術錯誤丟給使用者看。
-MAX_ATTEMPTS = 3
-RETRY_BACKOFF_SECONDS = (2, 4)
+# 模型依序嘗試，前面的叫不動就換下一個。
+# 實測（2026-09-20，各連續呼叫 4 次）：
+#   gemini-flash-latest    0/4（429 配額用盡）  ← 原本用這個，熱門模型免費配額很緊
+#   gemini-3.8-flash       0/4（429）
+#   gemini-3.5-flash       3/4（偶發 503）
+#   gemini-flash-lite-latest 4/4                ← 改用這個當主力
+# 解讀任務只是把算好的數字翻成白話，不需要頂級推理能力，lite 版綽綽有餘。
+GEMINI_MODELS = ("gemini-flash-lite-latest", "gemini-3.5-flash")
+MAX_ATTEMPTS_PER_MODEL = 2
+RETRY_BACKOFF_SECONDS = 2
 
 DISCLAIMER = "本內容由 AI 根據既有數據自動生成，僅為資訊整理，非投資建議，請自行判斷風險。"
 
@@ -48,38 +53,44 @@ def _save_cached(cache_key: str, result: dict) -> None:
     db.collection(CACHE_COLLECTION).document(cache_key).set(result)
 
 
-def _is_transient(err: Exception) -> bool:
-    """判斷是不是 Google 端的暫時性狀況（過載、限流），這類重試有機會成功。"""
-    code = getattr(err, "code", None)
-    if code in (429, 500, 502, 503, 504):
+def _is_quota(err: Exception) -> bool:
+    """配額用盡或被限流。重試同一個模型沒用（配額不會幾秒內恢復），要直接換模型。"""
+    return getattr(err, "code", None) == 429 or "RESOURCE_EXHAUSTED" in str(err)
+
+
+def _is_overloaded(err: Exception) -> bool:
+    """伺服器端暫時過載，同一個模型稍等再試有機會成功。"""
+    if getattr(err, "code", None) in (500, 502, 503, 504):
         return True
-    text = str(err)
-    return "UNAVAILABLE" in text or "RESOURCE_EXHAUSTED" in text
+    return "UNAVAILABLE" in str(err)
 
 
 def _generate_with_retry(client, prompt: str):
-    """呼叫 Gemini，遇到暫時性錯誤時退避重試。"""
+    """依序嘗試各模型：過載就退避重試同一個，配額用盡就直接換下一個。"""
     last_err = None
-    for attempt in range(MAX_ATTEMPTS):
-        try:
-            return client.models.generate_content(
-                model=GEMINI_MODEL,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    response_schema=INSIGHT_SCHEMA,
-                ),
-            )
-        except Exception as err:
-            last_err = err
-            if attempt < MAX_ATTEMPTS - 1 and _is_transient(err):
-                time.sleep(RETRY_BACKOFF_SECONDS[attempt])
-                continue
-            break
+    for model in GEMINI_MODELS:
+        for attempt in range(MAX_ATTEMPTS_PER_MODEL):
+            try:
+                return client.models.generate_content(
+                    model=model,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        response_schema=INSIGHT_SCHEMA,
+                    ),
+                )
+            except Exception as err:
+                last_err = err
+                if _is_overloaded(err) and attempt < MAX_ATTEMPTS_PER_MODEL - 1:
+                    time.sleep(RETRY_BACKOFF_SECONDS)
+                    continue
+                break  # 配額用盡或其他錯誤，換下一個模型
 
-    if _is_transient(last_err):
-        raise RuntimeError("AI 服務目前忙碌中，請稍後再試一次") from last_err
-    raise RuntimeError("AI 解讀產生失敗，請稍後再試") from last_err
+    if _is_quota(last_err):
+        raise RuntimeError("AI 解讀的今日免費用量已用完，請明天再試")
+    if _is_overloaded(last_err):
+        raise RuntimeError("AI 服務目前忙碌中，請稍後再試一次")
+    raise RuntimeError("AI 解讀產生失敗，請稍後再試")
 
 
 def _build_prompt(stock: dict) -> str:
