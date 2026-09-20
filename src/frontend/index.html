@@ -69,7 +69,7 @@ function screener() {
         this.authLoading = false;
         if (u) {
           await this.loadStatus();
-          await this.loadFavorites();
+          await this.loadFavoriteCodes();
         } else {
           this.results   = null;
           this.favorites = null;
@@ -137,14 +137,49 @@ function screener() {
       }
     },
 
-    async toggleFavorite(code) {
-      const isFav = this.favoriteCodes.has(code);
+    // 只抓股號清單，用來畫星號。比 loadFavorites() 輕很多，
+    // 因為後端不需要讀整份股票快照。
+    async loadFavoriteCodes() {
       try {
-        const r = await this.apiFetch(`/api/favorites/${code}`, { method: isFav ? 'DELETE' : 'POST' });
+        const r = await this.apiFetch('/api/favorites/codes');
+        if (!r.ok) return;
+        const d = await r.json();
+        this.favoriteCodes = new Set(d.codes);
+      } catch {
+        // 星號畫不出來不影響主要功能，靜默略過
+      }
+    },
+
+    // 樂觀更新：先讓星號立刻反應，再背景送請求，失敗才還原。
+    // 不這樣做的話，使用者要等台灣↔新加坡的網路往返才看得到反應。
+    async toggleFavorite(code) {
+      const prevCodes     = this.favoriteCodes;
+      const prevFavorites = this.favorites;
+      const wasFav        = prevCodes.has(code);
+
+      const next = new Set(prevCodes);
+      if (wasFav) next.delete(code); else next.add(code);
+      this.favoriteCodes = next;
+
+      // 在「我的收藏」分頁取消收藏時，該列也要立刻消失
+      if (wasFav && this.favorites) {
+        this.favorites = this.favorites.filter(s => s.code !== code);
+      }
+
+      try {
+        const r = await this.apiFetch(`/api/favorites/${code}`, { method: wasFav ? 'DELETE' : 'POST' });
         if (!r.ok) throw new Error('收藏操作失敗');
-        await this.loadFavorites();
+        const d = await r.json();
+        this.favoriteCodes = new Set(d.codes);
+
+        // 只有「新增收藏」而且正在看收藏分頁時，才需要重抓完整資料填表格
+        if (!wasFav && this.activeTab === 'favorites') {
+          await this.loadFavorites();
+        }
       } catch (e) {
-        this.error = e.message;
+        this.favoriteCodes = prevCodes;
+        this.favorites     = prevFavorites;
+        this.error         = e.message;
       }
     },
 

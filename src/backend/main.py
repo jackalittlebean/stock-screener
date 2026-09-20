@@ -82,6 +82,12 @@ def get_favorites(user_id: str = Depends(get_current_user)):
     return {"count": len(results), "stocks": results}
 
 
+@app.get("/api/favorites/codes")
+def get_favorite_codes(user_id: str = Depends(get_current_user)):
+    """只回收藏的股號，不讀整份股票快照——給前端畫星號用，比 /api/favorites 輕很多。"""
+    return {"codes": favorites_store.load_favorites(user_id)}
+
+
 @app.post("/api/favorites/{code}")
 def add_favorite(code: str, user_id: str = Depends(get_current_user)):
     codes = favorites_store.add_favorite(user_id, code)
