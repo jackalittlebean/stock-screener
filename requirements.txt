@@ -1,9 +1,7 @@
+# 網站（Render Web Service）用：只放 main.py 這條路徑需要的套件
+# 排程抓資料用的重量級套件在 requirements-fetch.txt
 fastapi
 uvicorn
-yfinance
-pandas
-pandas-ta
-requests
 python-dotenv
 google-genai
 firebase-admin

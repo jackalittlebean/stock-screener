@@ -1,0 +1,7 @@
+# 排程抓資料（GitHub Actions）用：stock_list.py + data_fetcher.py 需要的套件
+requests
+yfinance
+pandas
+pandas-ta
+python-dotenv
+firebase-admin

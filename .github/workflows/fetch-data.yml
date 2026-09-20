@@ -16,7 +16,7 @@ jobs:
           python-version: "3.13"
 
       - name: 安裝套件
-        run: pip install -r requirements.txt
+        run: pip install -r requirements-fetch.txt
 
       - name: 還原 Firebase 服務帳戶金鑰
         run: echo "$FIREBASE_SERVICE_ACCOUNT_JSON" > firebase-service-account.json
