@@ -25,6 +25,50 @@ DATA_DIR = Path(__file__).parent.parent.parent / "data"
 FINMIND_TOKEN = os.getenv("FINMIND_TOKEN", "")
 FINMIND_API = "https://api.finmindtrade.com/api/v4/data"
 
+# FinMind 免費額度約 600 次/天。過去的做法是每支股票都打一次，跑到第 570 支左右
+# 就被限流，之後 1400 多支全部靜默失敗、營收欄位變成空值（涵蓋率只有 28.8%）。
+# 改成游標式輪抓：每天只抓額度內的股票，沒輪到的沿用上一輪的值，幾天內輪完全市場。
+FINMIND_DAILY_LIMIT = 600
+SAFETY_MARGIN = 20          # 留一點餘裕，避免剛好卡在上限
+CURSOR_DOC = "revenue_cursor"
+USAGE_DOC = "finmind_usage"
+
+
+def _revenue_budget() -> int:
+    """本輪可用的 FinMind 請求數 = 每日上限 - deep_fetcher 已用掉的 - 安全邊際。"""
+    used = 0
+    doc = db.collection("meta").document(USAGE_DOC).get()
+    if doc.exists:
+        data = doc.to_dict()
+        # 只認今天的用量紀錄，跨日就歸零重算
+        if data.get("date") == datetime.now().strftime("%Y-%m-%d"):
+            used = data.get("used", 0)
+    return max(0, FINMIND_DAILY_LIMIT - used - SAFETY_MARGIN)
+
+
+def _load_cursor() -> int:
+    doc = db.collection("meta").document(CURSOR_DOC).get()
+    return doc.to_dict().get("index", 0) if doc.exists else 0
+
+
+def _save_cursor(index: int) -> None:
+    db.collection("meta").document(CURSOR_DOC).set({
+        "index": index,
+        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+    })
+
+
+def _load_previous_growth() -> dict:
+    """取出上一輪已經抓到的營收年增率。這輪沒輪到的股票沿用這些值，資料才不會倒退。"""
+    doc = db.collection("meta").document("stocks_snapshot").get()
+    if not doc.exists:
+        return {}
+    return {
+        s["code"]: s.get("revenue_growth")
+        for s in doc.to_dict().get("stocks", [])
+        if s.get("revenue_growth") is not None
+    }
+
 
 # ── FinMind：月營收年增率 ──────────────────────────────────────────────────────
 
@@ -143,7 +187,17 @@ def run():
         stocks = json.load(f)
 
     total = len(stocks)
+    # 這輪由誰負責抓營收：從上次的游標往後數「額度允許的支數」，繞一圈後回到開頭
+    prev_growth = _load_previous_growth()
+    budget = _revenue_budget()
+    cursor = _load_cursor() % total if total else 0
+    rotation = [stocks[(cursor + n) % total]["code"] for n in range(min(budget, total))]
+    revenue_targets = set(rotation)
+    next_cursor = (cursor + len(rotation)) % total if total else 0
+
     print(f"開始處理 {total} 支股票...")
+    print(f"本輪營收額度 {budget} 次，從第 {cursor + 1} 支開始抓 {len(rotation)} 支，"
+          f"其餘沿用上一輪的值（已有 {len(prev_growth)} 支有資料）")
 
     results = []
     for i, s in enumerate(stocks, 1):
@@ -175,7 +229,14 @@ def run():
         eps = round(float(eps), 2) if eps and not pd.isna(eps) and math.isfinite(eps) else None
 
         # FinMind 月營收年增率
-        revenue_growth = fetch_revenue_growth(code)
+        # 只抓本輪負責的股票，其餘沿用舊值。抓失敗（額度用盡）時也回退到舊值，
+        # 避免已經有的資料被 None 覆蓋掉，涵蓋率才能隨著輪抓逐步補滿。
+        if code in revenue_targets:
+            revenue_growth = fetch_revenue_growth(code)
+            if revenue_growth is None:
+                revenue_growth = prev_growth.get(code)
+        else:
+            revenue_growth = prev_growth.get(code)
 
         record = {
             "code": code,
@@ -197,7 +258,12 @@ def run():
             print(f"  ── 已存 {len(results)} 筆中間結果 ──")
 
     _save(results)
+    _save_cursor(next_cursor)
+
+    covered = sum(1 for r in results if r.get("revenue_growth") is not None)
     print(f"\n完成！共 {len(results)} 支有效股票，已存進 Firestore meta/stocks_snapshot")
+    print(f"營收涵蓋率：{covered}/{len(results)} "
+          f"({covered / len(results) * 100:.1f}%)，下一輪從第 {next_cursor + 1} 支開始")
 
 
 def _save(results: list):

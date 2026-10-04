@@ -26,7 +26,15 @@ jobs:
       - name: 抓股票清單
         run: python src/backend/stock_list.py
 
-      - name: 抓資料並存進 Firestore
+      # 先抓收藏股票的深度資料（使用者最在意的），跑完會記錄用掉的 FinMind 次數，
+      # 下一步的全市場輪抓才知道還剩多少額度（兩者共用每日 600 次上限）
+      - name: 抓收藏股票的深度資料
+        run: python src/backend/deep_fetcher.py
+        env:
+          FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+          FIREBASE_SERVICE_ACCOUNT_PATH: ./firebase-service-account.json
+
+      - name: 抓全市場資料並存進 Firestore
         run: python src/backend/data_fetcher.py
         env:
           FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}

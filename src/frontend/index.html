@@ -59,6 +59,7 @@ function screener() {
       open:    false,
       stock:   null,
       insight: null,
+      deep:    null,
       loading: false,
       error:   '',
     },
@@ -256,7 +257,25 @@ function screener() {
       this.detail.open    = true;
       this.detail.stock   = stock;
       this.detail.insight = null;
+      this.detail.deep    = null;
       this.detail.error   = '';
+      this.loadDeep();
+    },
+
+    // 營收趨勢與法人動向是客觀數據，打開詳情就直接載入，
+    // 不用等使用者按「取得 AI 解讀」——這樣 AI 說的話你能自己對照驗證。
+    async loadDeep() {
+      const code = this.detail.stock?.code;
+      if (!code) return;
+      try {
+        const r = await this.apiFetch(`/api/stocks/${code}/deep`);
+        if (!r.ok) return;
+        const d = await r.json();
+        // 視窗可能已經被關掉或換了一支股票，避免把舊請求的結果蓋上去
+        if (this.detail.stock?.code === code) this.detail.deep = d.deep;
+      } catch {
+        // 追蹤數據載入失敗不影響主要資訊，靜默略過
+      }
     },
 
     closeDetail() {
@@ -620,6 +639,44 @@ window.screener = screener;
           <div class="bg-gray-50 rounded-lg p-2.5"><p class="text-xs text-gray-400">60MA</p><p class="font-semibold" x-text="detail.stock.ma60 ?? '—'"></p></div>
         </div>
 
+        <!-- 深度資料：只有被收藏過的股票才會有（每日排程另外抓取） -->
+        <template x-if="detail.deep">
+          <div class="border-t border-gray-100 pt-4 mb-4 space-y-3">
+            <h4 class="text-sm font-semibold text-gray-700">追蹤數據</h4>
+
+            <div x-show="detail.deep.revenue_trend && detail.deep.revenue_trend.length">
+              <p class="text-xs text-gray-400 mb-1.5">月營收年增率（新到舊）</p>
+              <div class="flex flex-wrap gap-1.5">
+                <template x-for="m in detail.deep.revenue_trend.slice(0, 8)" :key="m.ym">
+                  <span class="text-xs px-2 py-1 rounded font-mono"
+                        :class="m.growth > 0 ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-600'">
+                    <span x-text="m.ym.slice(2)"></span>
+                    <span class="font-semibold ml-1" x-text="(m.growth > 0 ? '+' : '') + m.growth + '%'"></span>
+                  </span>
+                </template>
+              </div>
+            </div>
+
+            <div x-show="detail.deep.institutional && detail.deep.institutional.recent_days">
+              <p class="text-xs text-gray-400 mb-1.5">
+                三大法人近 <span x-text="detail.deep.institutional.recent_days"></span> 日合計（張）
+              </p>
+              <div class="grid grid-cols-3 gap-2 text-sm">
+                <template x-for="k in [['外資','foreign_net'],['投信','trust_net'],['自營','dealer_net']]" :key="k[1]">
+                  <div class="bg-gray-50 rounded-lg p-2">
+                    <p class="text-xs text-gray-400" x-text="k[0]"></p>
+                    <p class="font-semibold font-mono"
+                       :class="detail.deep.institutional[k[1]] > 0 ? 'text-red-600' : detail.deep.institutional[k[1]] < 0 ? 'text-green-700' : 'text-gray-500'"
+                       x-text="(detail.deep.institutional[k[1]] > 0 ? '+' : '') + detail.deep.institutional[k[1]].toLocaleString()"></p>
+                  </div>
+                </template>
+              </div>
+            </div>
+
+            <p class="text-xs text-gray-400">資料更新：<span x-text="detail.deep.updated_at"></span></p>
+          </div>
+        </template>
+
         <!-- AI 解讀 -->
         <div class="border-t border-gray-100 pt-4">
           <div class="flex items-center justify-between mb-2">
@@ -639,6 +696,10 @@ window.screener = screener;
               <div>
                 <p class="text-xs text-gray-400 mb-1">綜合判讀</p>
                 <p class="text-gray-700" x-text="detail.insight.signal_reading"></p>
+              </div>
+              <div x-show="detail.insight.trend_reading">
+                <p class="text-xs text-gray-400 mb-1">趨勢與籌碼</p>
+                <p class="text-gray-700" x-text="detail.insight.trend_reading"></p>
               </div>
               <div>
                 <p class="text-xs text-gray-400 mb-1">數字的相對位置</p>

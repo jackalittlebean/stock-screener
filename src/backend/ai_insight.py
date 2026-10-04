@@ -32,16 +32,26 @@ RETRY_BACKOFF_SECONDS = 2
 
 DISCLAIMER = "本內容由 AI 根據既有數據自動生成，僅為資訊整理，非投資建議，請自行判斷風險。"
 
+_BASE_PROPS = {
+    "summary":        {"type": "string"},
+    "signal_reading": {"type": "string"},
+    "context":        {"type": "string"},
+    "watch_points":   {"type": "array", "items": {"type": "string"}},
+    "data_gaps":      {"type": "string"},
+}
+
+# 沒有深度資料（非收藏股票）時用這份
 INSIGHT_SCHEMA = {
     "type": "object",
-    "properties": {
-        "summary":        {"type": "string"},
-        "signal_reading": {"type": "string"},
-        "context":        {"type": "string"},
-        "watch_points":   {"type": "array", "items": {"type": "string"}},
-        "data_gaps":      {"type": "string"},
-    },
-    "required": ["summary", "signal_reading", "context", "watch_points", "data_gaps"],
+    "properties": dict(_BASE_PROPS),
+    "required": list(_BASE_PROPS),
+}
+
+# 有深度資料時多一欄趨勢與籌碼判讀
+INSIGHT_SCHEMA_DEEP = {
+    "type": "object",
+    "properties": {**_BASE_PROPS, "trend_reading": {"type": "string"}},
+    "required": [*_BASE_PROPS, "trend_reading"],
 }
 
 
@@ -66,7 +76,7 @@ def _is_overloaded(err: Exception) -> bool:
     return "UNAVAILABLE" in str(err)
 
 
-def _generate_with_retry(client, prompt: str):
+def _generate_with_retry(client, prompt: str, schema: dict = None):
     """依序嘗試各模型：過載就退避重試同一個，配額用盡就直接換下一個。"""
     last_err = None
     for model in GEMINI_MODELS:
@@ -77,7 +87,7 @@ def _generate_with_retry(client, prompt: str):
                     contents=prompt,
                     config=types.GenerateContentConfig(
                         response_mime_type="application/json",
-                        response_schema=INSIGHT_SCHEMA,
+                        response_schema=schema or INSIGHT_SCHEMA,
                     ),
                 )
             except Exception as err:
@@ -94,9 +104,57 @@ def _generate_with_retry(client, prompt: str):
     raise RuntimeError("AI 解讀產生失敗，請稍後再試")
 
 
-def _build_prompt(stock: dict) -> str:
+def _format_deep(deep: dict) -> str:
+    """把營收趨勢與法人買賣超整理成 prompt 看得懂的文字；沒有深度資料回傳空字串。"""
+    if not deep:
+        return ""
+
+    parts = []
+    trend = deep.get("revenue_trend") or []
+    if trend:
+        series = "、".join(f"{t['ym']} {t['growth']:+.1f}%" for t in trend)
+        parts.append(f"月營收年增率走勢（新到舊）：{series}")
+
+    inst = deep.get("institutional") or {}
+    if inst:
+        days = inst.get("recent_days", 0)
+        parts.append(
+            f"近 {days} 個交易日三大法人合計（單位：張，正為買超、負為賣超）："
+            f"外資 {inst.get('foreign_net', 0):+,}、投信 {inst.get('trust_net', 0):+,}、"
+            f"自營商 {inst.get('dealer_net', 0):+,}"
+        )
+        daily = inst.get("daily") or []
+        if daily:
+            detail = "；".join(
+                f"{d['date']} 外資{d['foreign']:+,}/投信{d['trust']:+,}" for d in daily
+            )
+            parts.append(f"法人逐日明細：{detail}")
+
+    return "\n".join(parts)
+
+
+def _build_prompt(stock: dict, deep: dict | None = None) -> str:
     def fmt(v):
         return "N/A" if v is None else v
+
+    # 全市場快照是輪抓的（可能是幾天前的值），深度資料是當天抓的。
+    # 兩邊的營收數字會對不起來，同時餵給 AI 它會混亂甚至採信舊值，
+    # 所以有深度資料時就不再單獨列快照那行，讓趨勢序列（第一筆即最新）當唯一來源。
+    has_trend = bool(deep and deep.get("revenue_trend"))
+    revenue_line = (
+        "" if has_trend
+        else f"月營收年增率：{fmt(stock.get('revenue_growth'))}%（N/A 代表無資料）"
+    )
+
+    # 只有拿得到營收趨勢與法人資料時，才要求 AI 多寫一段趨勢判讀
+    deep_field_spec = ""
+    if deep:
+        deep_field_spec = """
+- trend_reading：解讀營收趨勢與法人動向（3–4 句）。重點放在「方向與變化」而非單月數字：
+  營收年增率是在加速、減速還是轉折；法人是連續同向還是彼此分歧（例如外資賣超但投信買超）。
+  特別要指出趨勢與股價表現之間的背離，例如營收連月加速但法人持續賣超、
+  或營收轉弱但股價仍在均線之上。不要只說「外資賣超 X 張」這種複述，要說這個方向持續多久、代表什麼。
+  你只知道「法人買賣的數字」，不知道「法人為什麼這樣做」，不要臆測原因。"""
 
     return f"""你是一位協助解讀股票數據的分析助手，服務對象是不具財經專業知識的一般使用者。
 
@@ -106,7 +164,7 @@ def _build_prompt(stock: dict) -> str:
 
 【嚴格禁止】
 - 禁止逐項複述數字（例如「RSI 是 38.9，代表偏弱」這種把畫面上的數字再講一次的句子）
-- 禁止提及公司近況、新聞、訂單、法人動向、產業趨勢、競爭對手、未來展望——你沒有這些資料，
+- 禁止提及公司近況、新聞、訂單、產業趨勢、競爭對手、未來展望——你沒有這些資料，
   講出來就是編造。只能用下面提供的數字，以及技術指標的通用判讀原則（例如 RSI 30 以下通稱超賣區）
 - 禁止給買賣建議、目標價、進出場時機
 
@@ -120,7 +178,8 @@ RSI(14)：{fmt(stock.get('rsi'))}
 MACD交叉狀態：{fmt(stock.get('macd_cross'))}（golden=黃金交叉, death=死亡交叉, 無資料代表無明顯交叉）
 本益比 PE：{fmt(stock.get('pe'))}
 EPS：{fmt(stock.get('eps'))}
-月營收年增率：{fmt(stock.get('revenue_growth'))}%（N/A 代表無資料）
+{revenue_line}
+{_format_deep(deep)}
 
 請用繁體中文回覆，各欄位要求：
 
@@ -139,10 +198,11 @@ EPS：{fmt(stock.get('eps'))}
 
 - data_gaps：哪些欄位缺資料、因此哪部分判斷受限（1–2 句）。若資料齊全就說明判讀完整度良好。
   這欄的用意是誠實標示不確定性，不要粉飾。
+{deep_field_spec}
 """
 
 
-def get_stock_insight(stock: dict, data_updated_at: str) -> dict:
+def get_stock_insight(stock: dict, data_updated_at: str, deep: dict | None = None) -> dict:
     """
     回傳該股票的 AI 解讀（含快取）。
     data_updated_at 用來組快取 key，stocks.json 更新後會自動重新產生解讀。
@@ -152,14 +212,16 @@ def get_stock_insight(stock: dict, data_updated_at: str) -> dict:
 
     code = stock["code"]
     # 加版本號：prompt/輸出結構改版後，舊格式的快取會自動失效，不必手動清除
-    cache_key = f"{code}_{data_updated_at}_v2"
+    # 快取 key 要區分有無深度資料，否則兩種解讀會互相覆蓋
+    cache_key = f"{code}_{data_updated_at}_v3" + ("_deep" if deep else "")
 
     cached = _load_cached(cache_key)
     if cached is not None:
         return cached
 
     client = genai.Client(api_key=GEMINI_API_KEY)
-    response = _generate_with_retry(client, _build_prompt(stock))
+    schema = INSIGHT_SCHEMA_DEEP if deep else INSIGHT_SCHEMA
+    response = _generate_with_retry(client, _build_prompt(stock, deep), schema)
     result = json.loads(response.text)
     result["disclaimer"] = DISCLAIMER
     result["generated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")

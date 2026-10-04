@@ -30,6 +30,12 @@ FRONTEND_DIR = BASE_DIR / "src" / "frontend"
 app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR)), name="static")
 
 
+def _load_deep(code: str) -> dict | None:
+    """讀該股票的深度資料（營收趨勢、法人買賣超）。只有被收藏過的股票才會有。"""
+    doc = db.collection("deep_data").document(code).get()
+    return doc.to_dict() if doc.exists else None
+
+
 def _load_snapshot():
     """讀 Firestore 的 meta/stocks_snapshot，回傳 (stocks, updated_at)；尚未產生資料回傳 (None, None)。"""
     doc = db.collection("meta").document("stocks_snapshot").get()
@@ -100,6 +106,12 @@ def remove_favorite(code: str, user_id: str = Depends(get_current_user)):
     return {"codes": codes}
 
 
+@app.get("/api/stocks/{code}/deep")
+def stock_deep(code: str, user_id: str = Depends(get_current_user)):
+    """營收趨勢與法人買賣超。只有被收藏過的股票會有，沒有就回 null 讓前端隱藏該區塊。"""
+    return {"code": code, "deep": _load_deep(code)}
+
+
 @app.get("/api/stocks/{code}/insight")
 def stock_insight(code: str, user_id: str = Depends(get_current_user)):
     stocks, updated_at = _load_snapshot()
@@ -110,8 +122,9 @@ def stock_insight(code: str, user_id: str = Depends(get_current_user)):
         raise HTTPException(status_code=404, detail="找不到此股票代碼")
 
     updated_at = (updated_at or "")[:10]
+    deep = _load_deep(code)
     try:
-        insight = get_stock_insight(stock, updated_at)
+        insight = get_stock_insight(stock, updated_at, deep)
     except RuntimeError as e:
         raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
